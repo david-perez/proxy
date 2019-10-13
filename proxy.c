@@ -75,7 +75,7 @@ void sigterm_handler(int signal);
 void server_loop();
 void handle_client(int client_sock, struct sockaddr_storage client_addr);
 void forward_data(int source_sock, int destination_sock);
-void forward_data_ext(int source_sock, int destination_sock, char *cmd);
+void forward_data_ext(int source_sock, int destination_sock, char *cmd, int log, int to_remote);
 int create_connection();
 int parse_options(int argc, char *argv[]);
 void plog(int priority, const char *format, ...);
@@ -303,7 +303,7 @@ void server_loop() {
             exit(0);
         } else
             connections_processed++;
-        
+
         close(client_sock);
     }
 
@@ -321,7 +321,8 @@ void handle_client(int client_sock, struct sockaddr_storage client_addr)
 
     if (fork() == 0) { // a process forwarding data from client to remote socket
         if (cmd_out) {
-            forward_data_ext(client_sock, remote_sock, cmd_out);
+            // Set 4th param to 1 to log.
+            forward_data_ext(client_sock, remote_sock, cmd_out, 0, 1);
         } else {
             forward_data(client_sock, remote_sock);
         }
@@ -330,7 +331,8 @@ void handle_client(int client_sock, struct sockaddr_storage client_addr)
 
     if (fork() == 0) { // a process forwarding data from remote socket to client
         if (cmd_in) {
-            forward_data_ext(remote_sock, client_sock, cmd_in);
+            // Set 4th param to 1 to log.
+            forward_data_ext(remote_sock, client_sock, cmd_in, 1, 0);
         } else {
             forward_data(remote_sock, client_sock);
         }
@@ -386,7 +388,7 @@ void forward_data(int source_sock, int destination_sock) {
 }
 
 /* Forward data between sockets through external command */
-void forward_data_ext(int source_sock, int destination_sock, char *cmd) {
+void forward_data_ext(int source_sock, int destination_sock, char *cmd, int log, int to_remote) {
     char buffer[BUF_SIZE];
     int n, i, pipe_in[2], pipe_out[2];
 
@@ -406,13 +408,40 @@ void forward_data_ext(int source_sock, int destination_sock, char *cmd) {
         close(pipe_in[READ]); // no need to read from input pipe here
         close(pipe_out[WRITE]); // no need to write to output pipe here
 
-        while ((n = recv(source_sock, buffer, BUF_SIZE, 0)) > 0) { // read data from input socket
-            if (write(pipe_in[WRITE], buffer, n) < 0) { // write data to input pipe of external command
-                plog(LOG_ERR, "Cannot write to pipe: %m");
-                exit(BROKEN_PIPE_ERROR);
+        fcntl(pipe_out[READ], F_SETFL, O_NONBLOCK);
+
+        while (1) {
+            n = recv(source_sock, buffer, BUF_SIZE, MSG_DONTWAIT);
+            if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                // There probably will be more data coming along...
+                // It's just that the external program hasn't yet
+                // line-processed the whole server response / client request.
+            } else if (n <= 0) {
+                // Socket is probably done and we should shut down.
+                break;
+            } else if (n > 0) {
+                if (write(pipe_in[WRITE], buffer, n) < 0) { // write data to input pipe of external command
+                    plog(LOG_ERR, "Cannot write to pipe: %m");
+                    exit(BROKEN_PIPE_ERROR);
+                }
+
+                if (log) {
+                    if (to_remote) printf("\n>>> recv from mbsync and written to Perl\n");
+                    else printf("\n>>> recv from gmail and written to Perl\n");
+                    fwrite(buffer, 1, n, stdout);
+                    fflush(stdout);
+                }
             }
-            if ((i = read(pipe_out[READ], buffer, BUF_SIZE)) > 0) { // read command output
+
+            if ((i = read(pipe_out[READ], buffer, BUF_SIZE)) > 0) {
                 send(destination_sock, buffer, i, 0); // send data to output socket
+
+                if (log) {
+                    if (to_remote) printf("\n<<< sent to gmail after Perl\n");
+                    else printf("\n<<< sent to mbsync after Perl\n");
+                    fwrite(buffer, 1, i, stdout);
+                    fflush(stdout);
+                }
             }
         }
 
