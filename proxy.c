@@ -322,7 +322,7 @@ void handle_client(int client_sock, struct sockaddr_storage client_addr)
     if (fork() == 0) { // a process forwarding data from client to remote socket
         if (cmd_out) {
             // Set 4th param to 1 to log.
-            forward_data_ext(client_sock, remote_sock, cmd_out, 0, 1);
+            forward_data_ext(client_sock, remote_sock, cmd_out, 0, 0);
         } else {
             forward_data(client_sock, remote_sock);
         }
